@@ -91,10 +91,13 @@ for (const path of pages) {
 	if (violations.length) axeBad.push({ path, violations });
 }
 
+const UI_PREFERENCE_KEYS = new Set(['starlight-theme', 'sl-sidebar-state']);
 // Nothing may persist: a docs site keeps no state about its reader.
-for (const stored of await page.evaluate(() => ({ local: Object.keys(localStorage), session: Object.keys(sessionStorage) }))) {
+for (const stored of [await page.evaluate(() => ({ local: Object.keys(localStorage), session: Object.keys(sessionStorage) }))]) {
 	for (const bag of Object.values(stored)) {
-		for (const name of bag) fail(`storage key ${name} was persisted — the docs keep nothing`);
+		// Starlight's own UI preferences (theme, sidebar state) are allowed by name; nothing else may persist,
+		// and never a token (the workspace rule: no stored tokens).
+		for (const name of bag) if (!UI_PREFERENCE_KEYS.has(name)) fail(`storage key ${name} was persisted — the docs keep nothing but UI preferences`);
 	}
 }
 const cookies = await context.cookies();
