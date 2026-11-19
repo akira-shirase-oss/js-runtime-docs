@@ -1,0 +1,48 @@
+---
+title: Introduction
+description: What jsrt is, who it is for, and where to start reading.
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+jsrt is a purpose-built JavaScript host: the engine is borrowed and everything that matters is
+ours. V8 executes scripts through `deno_core` (the same crate Deno builds on); the Rust host owns
+the capabilities, the lifecycle and the error classification. The goal is a useful host with a real
+sandbox — not Deno or Node compatibility, and not a new JavaScript engine.
+
+A script sees exactly one namespace, `rt.*`, and can do only what an op grants — and an op only
+works when the run's **manifest** declares the capability. No manifest means no filesystem, no
+network, nothing to listen on: compute and print, and nothing else. Every way a run can end has its
+own exit code, so a timeout is never confused with a thrown error, and a refused capability has a
+name a script can catch.
+
+## Who it is for
+
+- **People running untrusted-ish JavaScript**: a webhook receiver, a plugin hook, a transform — the
+  manifest says what the script may reach, the sandbox enforces it, and every refusal names what was
+  asked for without leaking host paths.
+- **Operators** get a process boundary: `jsrt supervise` runs a script in a worker process with CPU,
+  RSS, wall-clock and output budgets, a JSON report of how it ended, secret redaction on forwarded
+  output, and signal forwarding that kills cleanly.
+
+## What a script can do
+
+`rt.print`, `rt.hostInfo`, `rt.now`, `rt.sleep`, Node-style timers, `rt.readText`, `rt.fetch`,
+`rt.kv` (embedded SQLite), `rt.media` (content-addressed uploads) and `rt.serve` (a loopback HTTP
+listener). `console.log` works too. Anything not on that list does not exist for the script — that
+is the point.
+
+:::note[Status]
+**jsrt v1.0.0**, built from source. Every page here describes what is on the `main` branch of
+[js-runtime](https://github.com/akira-shirase-oss/js-runtime) today, and every example runs against
+it in this site's CI. There are no published binaries or crates — the quick start builds from a
+clone, the way the README's install section does. The [changelog](/changelog/) lists what shipped,
+newest first.
+:::
+
+## Start here
+
+<CardGrid>
+	<LinkCard title="Quick start" href="/quick-start/" description="Build jsrt from source, run a script, and watch deny-by-default work — all on this machine." />
+	<LinkCard title="Changelog" href="/changelog/" description="What changed and when, newest first." />
+</CardGrid>

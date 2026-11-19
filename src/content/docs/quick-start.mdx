@@ -1,0 +1,180 @@
+---
+title: Quick start
+description: Build jsrt from source, run your first script, watch deny-by-default refuse a fetch, then grant exactly what a small HTTP round-trip needs — all on this machine.
+---
+
+This page runs on this machine — it builds jsrt from source and runs it against a listener on
+`127.0.0.1`, where every example is real. By the end you will have run a script, watched a fetch be
+refused for lack of a grant, and served and fetched over HTTP with a manifest that grants exactly
+what those scripts need.
+
+**jsrt v1.0.0 has no published binaries** — you build from source today (`publish = false`; no
+crates.io package, no release artifacts). You need a Rust toolchain with rustup (the repository
+pins one in `rust-toolchain.toml`), `git` and `curl`.
+
+## 1. Get the source and build
+
+```sh run=quickstart step=install
+test -d js-runtime || git clone https://github.com/akira-shirase-oss/js-runtime.git
+cd js-runtime
+if command -v brew >/dev/null 2>&1; then export PATH="$(brew --prefix rustup)/bin:$PATH"; fi
+rustup toolchain install || rustup show
+cargo build --release --locked -p jsrt
+```
+
+The workspace builds more than one crate; `-p jsrt` builds the CLI and everything it needs, and the
+binary lands in `target/release/`. The first build downloads ~95 MB of prebuilt V8 for `deno_core`
+(`V8_FROM_SOURCE=1` builds the engine itself instead). `rust-toolchain.toml` pins Rust 1.99.1 —
+rustup installs it on demand; the `brew` line matters on macOS only, where Homebrew's own `cargo`
+ignores the pin.
+
+Then put the binary on PATH for this walkthrough and make a scratch directory beside the clone:
+
+```sh run=quickstart
+export PATH="$PWD/target/release:$PATH"
+cd .. && mkdir -p demo && cd demo
+```
+
+```sh run=quickstart
+jsrt --version
+```
+
+```text output=quickstart
+jsrt 1.0.0
+```
+
+## 2. Run a script
+
+Everything a script can do lives under one namespace, `rt.*`. There is no `Deno`, no `process`, no
+ambient global — anything not on the list does not exist.
+
+```js title="hello.js" run=quickstart file=hello.js
+const info = rt.hostInfo();
+rt.print(`hello from ${info.runtime} ${info.version} on ${info.engine}\n`);
+await rt.sleep(10);
+rt.print("slept 10ms and returned\n");
+```
+
+```sh run=quickstart
+jsrt run hello.js
+```
+
+```text output=quickstart
+hello from jsrt 1.0.0 on v8
+slept 10ms and returned
+```
+
+`rt.sleep` is the async timer; a bare `jsrt run` gives the whole run — module load, evaluation and
+every pending timer — a 10-second deadline (`--timeout`, `0` for none). A run that hits it ends as
+exit 6, terminated, which is a different thing from a script that threw.
+
+## 3. Watch deny-by-default work
+
+A script may only do what the run declares. With no manifest there are no grants, so this script
+never gets to ask for the page — the refusal is itself the run's result, a `CapabilityError` on
+stderr and exit code 7:
+
+```js title="fetch-denied.js" run=quickstart file=fetch-denied.js
+const res = await rt.fetch("https://app.example.com/api");
+rt.print(`status ${res.status}\n`);
+```
+
+```sh run=quickstart exit=7 stderr=1
+jsrt run fetch-denied.js
+```
+
+```text output=quickstart
+jsrt: capability: CapabilityError: CapabilityError: fetch denied: app.example.com:443 is not a declared net destination
+```
+
+Note what the message says: the host:port the script asked for — never a canonical host path, a
+resolved address or anything else the script didn't already know. A script can `catch` the
+`CapabilityError` and match on `e.name`; uncaught, it is exit 7.
+
+## 4. Grant exactly what's needed
+
+Capabilities come from a manifest. This one grants a `net` destination (the loopback listener, by
+IP literal — names that resolve to private addresses need an explicit opt-in instead) and a `serve`
+address (loopback IP literals only, in v1):
+
+```json title="jsrt.manifest.json" run=quickstart file=jsrt.manifest.json
+{
+  "net": ["127.0.0.1:47421"],
+  "serve": { "host": "127.0.0.1", "port": 47421 }
+}
+```
+
+A server script that answers `GET /hello` — `rt.serve` returns a handle immediately; the script's
+own event loop pulls requests off the wire and pushes answers back:
+
+```js title="server.js" run=quickstart file=server.js
+const server = rt.serve({ host: "127.0.0.1", port: 47421 }, (req) => {
+	if (req.path === "/hello") {
+		return {
+			status: 200,
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ hello: "from jsrt" }),
+		};
+	}
+	return { status: 404, body: "not found" };
+});
+rt.print("serving on 127.0.0.1:47421\n");
+await server.done;
+```
+
+Start it under the manifest — a listener outlives the 10-second default, so `--timeout 0` lifts the
+deadline for this run — and wait for the port:
+
+```sh run=quickstart
+jsrt run server.js --manifest jsrt.manifest.json --timeout 0 &
+SRV=$!
+for i in $(seq 1 50); do curl -sf http://127.0.0.1:47421/hello >/dev/null 2>&1 && break; sleep 0.1; done
+```
+
+It is a real HTTP server, so `curl` answers:
+
+```sh run=quickstart
+curl -s http://127.0.0.1:47421/hello
+```
+
+```json output=quickstart
+{"hello":"from jsrt"}
+```
+
+And from JavaScript — `rt.fetch` against the granted destination, one deadline over the whole
+exchange and a bounded body:
+
+```js title="client.js" run=quickstart file=client.js
+const res = await rt.fetch("http://127.0.0.1:47421/hello");
+rt.print(`status ${res.status}, ${res.bytes} bytes in ${res.durationMs}ms\n`);
+rt.print(res.body + "\n");
+```
+
+```sh run=quickstart
+jsrt run client.js --manifest jsrt.manifest.json
+```
+
+```text output=quickstart
+status 200, 21 bytes in 0.651375ms
+{"hello":"from jsrt"}
+```
+
+That round-trip is the whole model in miniature: nothing worked until the manifest declared it, and
+what was declared was exactly what was used — nothing more.
+
+## 5. Stop the listener
+
+The server is still running in this shell (its PID is in `$SRV`). Stop it when you are done:
+
+```sh run=quickstart step=stop
+kill $SRV 2>/dev/null || true
+```
+
+`server.close()` ends `server.done` from the inside; from the outside, a signal does the same job.
+For anything meant to stay up, `jsrt supervise` wraps the worker in CPU, memory and output budgets
+and reports how it ended — its page is on the way.
+
+## Where next
+
+- The [changelog](/changelog/) — what shipped in v1.0.0 and before, newest first.
+- Guides, the `rt.*` reference and self-hosting are being written; they land here as pages.
