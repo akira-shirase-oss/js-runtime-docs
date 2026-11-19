@@ -86,7 +86,7 @@ for (const path of pages) {
 	await page.waitForTimeout(300);
 	// Collect the page's code blocks: the example host a reader copies must be the reserved domain
 	// or a labelled loopback, never a real one.
-	codeTexts.push(...(await page.locator('pre').allInnerTexts()), ...(await page.locator('[data-code]').allAttributes().then((attrs) => attrs.map((a) => a['data-code'] ?? ''))));
+	codeTexts.push(...(await page.locator('pre').allInnerTexts()), ...(await page.locator('[data-code]').evaluateAll((els) => els.map((e) => e.getAttribute('data-code') ?? ''))));
 	const violations = await axeScan(page, { label: path });
 	if (violations.length) axeBad.push({ path, violations });
 }

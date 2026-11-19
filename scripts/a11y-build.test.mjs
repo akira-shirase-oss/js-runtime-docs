@@ -23,15 +23,18 @@ test('a wide table becomes focusable, a small one stays put', () => {
 	const wide = `<div class="table-wrapper"><table>${'<tr><th>column</th>'.repeat(12)}</tr>${'<tr><td>value with quite a long cell text here</td>'.repeat(12)}</tr>'.repeat(6)}</table></div>`;
 	const small = `<div class="table-wrapper"><table><tr><td>a</td><td>b</td></tr></table></div>`;
 	const out = processPage(`<html><body>${wide}${small}</body></html>`);
-	const tabbed = out.match(/tabindex="0" role="region" aria-label="Scrollable table"/g) ?? [];
+	const tabbed = out.match(/tabindex="0" role="region" aria-label="Scrollable table 1"/g) ?? [];
 	assert.equal(tabbed.length, 1, 'exactly one table got the attributes');
 	assert.ok(out.indexOf(tabbed[0]) < out.indexOf(small), 'it was the wide one');
 });
 
-test('a long code block becomes focusable', () => {
-	const code = `<div class="expressive-code"><figure class="frame"><pre><div class="ec-line"><span style="--0:#fff">${'x = "'.concat('a'.repeat(120), '"')}</span></div></pre></figure></div>`;
-	const out = processPage(`<html><body>${code}</body></html>`);
-	assert.match(out, /tabindex="0" role="region" aria-label="Scrollable code"/);
+test('every named region on a page gets a unique accessible name', () => {
+	const pre = '<pre tabindex="0" role="region" aria-label="Code example"><code>x</code></pre>';
+	const out = processPage(`<html><body>${pre}${pre}${pre}</body></html>`);
+	assert.match(out, /aria-label="Code example 1"/);
+	assert.match(out, /aria-label="Code example 2"/);
+	assert.match(out, /aria-label="Code example 3"/);
+	assert.ok(!out.includes('aria-label="Code example"'), 'no duplicated landmark name left');
 });
 
 test('inline scripts get hashed into the CSP', () => {
