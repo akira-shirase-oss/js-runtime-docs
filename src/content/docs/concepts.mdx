@@ -1,0 +1,60 @@
+---
+title: Concepts
+description: What jsrt is — the runtime model, the capability contract, the error taxonomy, and bounded everything.
+---
+
+## The runtime model
+
+jsrt is a purpose-built JavaScript host: **V8 executes scripts; the Rust host owns capabilities,
+lifecycle and honest errors.** A script sees one global, `rt`, plus `console` — there is no `Deno`,
+no `process`, no ambient platform. `rt` is the whole contract.
+
+The engine is `deno_core` (pinned `=0.413.0`), embedded — not wrapped aspirationally, and its
+behaviours aren't rewritten. `JsRuntime` is `!Send`: the runtime runs on one thread with a
+current-thread executor, so script work is sequential and predictable; CPU-bound termination goes
+through `terminate_execution` on a watchdog thread, because an async timeout alone can't preempt
+running JavaScript. A run is *load the entry module → run pending work → classify how it ended*.
+
+Two commands front it: `jsrt run` executes a module to completion; `jsrt supervise` runs it in a
+worker process under CPU/RSS/wall budgets with a JSON report — same script, same `rt`, bounded
+harder.
+
+## Capabilities: deny by default, declare or be refused
+
+A script can only do what an op grants, and a capability only works if the [manifest](/reference/manifest/)
+declares it. No manifest → compute and print. The sections map to the surface:
+
+| Grant | Unlocks | Bounded by |
+|---|---|---|
+| `read` | `rt.readText`, `rt.media.put` sources, data imports | fence, regular files, 4 MiB |
+| `net` | `rt.fetch` | GET only, deadline, 4 MiB body, ≤10 re-checked redirects, ≤32 in flight, public names only unless `private` |
+| `kv` | `rt.kv.*` | one SQLite file, size quota |
+| `media` | `rt.media.*` | local backend, per-upload cap |
+| `serve` | `rt.serve` | loopback IP literal only, body/connection/timeout caps |
+
+Flags (`--read`, `--net`, `--kv`, `--serve`, …) *join* a manifest — nothing a command line can say
+shrinks a grant, and nothing a script can do adds one.
+
+## Errors: classify, don't stringify
+
+Every way a run ends is a distinct class with an [exit code](/reference/cli/) — `0` clean, `2`
+usage, `3` load, `4` syntax, `5` exception, `6` terminated, `7` capability, `8` host. A capability
+refusal is a named `CapabilityError` a script catches and matches (`e.name`); terminated is never
+confused with exception; the supervisor's report carries the same taxonomy as `outcome` +
+`exit_code` + `killed_by` + `signal`. Refusals name what the script asked for — never a canonical
+host path, never an existence oracle.
+
+## Bounded everything
+
+Nothing a script can do is unbounded:
+
+- **Time** — run `--timeout`, fetch deadline, serve header/body/write timeouts, a first-byte grace
+  and a minimum body rate so slow clients can't hold slots.
+- **Space** — fetch and `readText` bodies 4 MiB, serve bodies a declared cap, KV and media quotas,
+  a V8 heap ceiling, supervisor RSS, bounded output per stream, a bounded and rotating report.
+- **Concurrency** — 32 fetches in flight, a declared connection cap answered with a fast 503.
+- **Surface** — modules are local files only; every non-`file:` scheme refused at resolve time.
+
+When a bound trips, the system *answers*: a refusal, a status, an exit code — and in the
+supervisor's report, a `killed_by` that says whose bound it was. The [security page](/self-hosting/security/)
+lists what the bounds deliberately don't cover.

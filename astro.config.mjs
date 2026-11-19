@@ -61,6 +61,36 @@ export default defineConfig({
 					items: [
 						{ label: 'Introduction', slug: 'index' },
 						{ label: 'Quick start', slug: 'quick-start' },
+						{ label: 'Concepts', slug: 'concepts' },
+					],
+				},
+				{
+					label: 'Guides',
+					items: [
+						{ label: 'Fetching with rt.fetch', slug: 'guides/fetch' },
+						{ label: 'Files and modules', slug: 'guides/files-and-modules' },
+						{ label: 'The KV store', slug: 'guides/kv' },
+						{ label: 'Media uploads', slug: 'guides/media' },
+						{ label: 'Serving HTTP', slug: 'guides/serve' },
+						{ label: 'A webhook endpoint', slug: 'guides/webhook-app' },
+					],
+				},
+				{
+					label: 'Reference',
+					items: [
+						{ label: 'The rt.* API', slug: 'reference/rt-api' },
+						{ label: 'CLI reference', slug: 'reference/cli' },
+						{ label: 'The manifest', slug: 'reference/manifest' },
+						{ label: 'Errors', slug: 'reference/errors' },
+					],
+				},
+				{
+					label: 'Self-hosting',
+					items: [
+						{ label: 'Installing', slug: 'self-hosting/install' },
+						{ label: 'Supervision', slug: 'self-hosting/supervise' },
+						{ label: 'Deploying', slug: 'self-hosting/deploy' },
+						{ label: 'Security model', slug: 'self-hosting/security' },
 					],
 				},
 				{ label: 'Changelog', link: '/changelog/' },
