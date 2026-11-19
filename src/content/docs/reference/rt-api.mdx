@@ -1,0 +1,59 @@
+---
+title: The rt.* API
+description: Every member of the rt namespace — what it takes, what it returns, which grant it needs.
+sidebar:
+  order: 1
+---
+
+A script sees exactly one global, `rt`, plus `console`. Everything else — `Deno`, `process`,
+ambient globals — does not exist. Each member below lists the grant that unlocks it; no grant, and
+the call throws `CapabilityError` (uncaught: exit 7).
+
+The declared surface lives in `src/data/surface.json`; CI fails when this page and
+`bootstrap.js` disagree in either direction.
+
+## Always available
+
+```js not-run="signatures; runnable calls are on the guide pages"
+rt.print(msg)                 // write to stdout, no added newline
+rt.hostInfo()                 // {runtime: "jsrt", version: "1.0.0", engine: "v8"}
+rt.now()                      // wall clock in milliseconds
+await rt.sleep(ms)            // async sleep
+```
+
+```js not-run="timers: Node-style ids, one-shot and repeating"
+const id = rt.setTimeout(cb, ms, ...args)    // cb(...args) after ms
+const id2 = rt.setInterval(cb, ms, ...args)  // cb(...args) every ms
+rt.clearTimeout(id); rt.clearInterval(id)    // already-fired ids are no-ops
+rt.unrefTimer(id)                            // let the loop exit without waiting on it
+rt.refTimer(id)                              // undo unrefTimer
+rt.pendingTimers()                           // how many timer ids the script still owns
+```
+
+## Grants required
+
+| Member | Grant | Returns | Bounds |
+|---|---|---|---|
+| `rt.readText(path)` | `read` | file contents as string | regular files only, 4 MiB cap |
+| `await rt.fetch(url)` | `net` | `{status, statusText, body, bytes, durationMs}` | GET only; one deadline; 4 MiB body cap; ≤10 redirects, each re-checked against the grant; ≤32 concurrent; environment proxies ignored |
+| `rt.kv.get(key)` | `kv` | value or `null` | |
+| `rt.kv.put(key, value)` | `kv` | — | throws past the file-size quota |
+| `rt.kv.delete(key)` | `kv` | `true` if anything was removed | |
+| `rt.kv.list(prefix, limit?)` | `kv` | `[{key, value}]` key-sorted under the exact prefix | default limit 1000 |
+| `await rt.media.put(srcPath)` | `media` + `read` on srcPath | `{name, bytes, sha256, state: "stored"}` | `name` is the sha256 hex; a mid-upload failure cleans its partial |
+| `await rt.media.stat(name)` | `media` | `{name, bytes}` or `null` | |
+| `rt.serve(opts, handler)` | `serve` | `{done, close}` — the handle is immediate | `opts.host` a loopback IP literal, `opts.port` must equal the grant |
+
+`rt.serve` calls `handler(req)` per request, `req` = `{method, path, headers, body}` where
+`headers` is an array of `[name, value]` pairs; the handler returns
+`{status?, headers?, body?}` — an array header value repeats the header (set-cookie needs one line
+per cookie). A throw answers 500 and the loop lives; `server.done` resolves when the listener
+closes, `server.close()` ends it.
+
+## Errors a script sees
+
+- `CapabilityError` — a grant it lacks. `e.name === "CapabilityError"`; uncaught, exit 7.
+- `TypeError` / `Error` — misuse or an ordinary failure (a fetch that reached a refused-grant
+  destination stays a `CapabilityError`; a refused connection is an ordinary error).
+
+See [Errors](/reference/errors/) for the exit-code contract and the refusal messages.

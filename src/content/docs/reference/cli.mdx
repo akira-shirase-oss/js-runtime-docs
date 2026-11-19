@@ -1,0 +1,207 @@
+---
+title: CLI reference
+description: jsrt run and jsrt supervise — every flag, and every exit code, exercised.
+sidebar:
+  order: 2
+---
+
+This page runs on this machine — every command below executed against the real binary and shows
+what it really printed, exits included.
+
+`jsrt` has two subcommands. `run` executes a module to completion; `supervise` wraps that same run
+in a worker process with resource budgets and a report of how it ended — it takes every `run` flag
+plus its own.
+
+```sh run=cli
+jsrt --help
+```
+
+```text output=cli
+jsrt CLI — a purpose-built JavaScript host.
+
+Usage: jsrt <COMMAND>
+
+Commands:
+  run        Run a JavaScript module to completion
+  supervise  Run a module in a supervised worker process — CPU seconds by rlimit, resident memory by footprint polling, a wall backstop, and a JSON report of how it ended
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `jsrt run <FILE>` — flags
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--timeout <ms>` | `10000` | Wall-clock deadline for the whole run — module load, evaluation and every pending timer/fetch. `0` lifts it. |
+| `--manifest <path>` | — | Capability manifest (JSON). Absent means deny-all. |
+| `--read <dir>` | — | Extra read path; repeatable, joined with the manifest's. |
+| `--net <host[:port]>` | — | Extra net destination; repeatable. A name resolves public addresses only. |
+| `--net-private <host[:port]>` | — | Like `--net`, but the name may also resolve to loopback/private/link-local. |
+| `--kv <path>` | — | Embedded KV store grant; joins the manifest's `kv` line. |
+| `--kv-max-mb <n>` | `64` | KV quota in MiB when granting via `--kv` (a manifest line wins). |
+| `--media-root <dir>` | — | Local media store grant; joins the manifest's `media` line. |
+| `--media-max-mb <n>` | `256` | Per-upload media cap in MiB when granting via `--media-root`. |
+| `--serve <host:port>` | — | HTTP listener grant, loopback IP literal only; joins the manifest's `serve`. |
+| `--fetch-timeout <ms>` | `0` | Per-fetch deadline; `0` keeps the built-in 10 s bound. |
+| `--max-heap-mb <n>` | `0` | V8 heap ceiling in MiB; `0` is V8's default, otherwise at least 16. Reaching it ends exit 6. The JavaScript heap only — `supervise --max-rss-mb` bounds the rest. |
+
+`--help` and `--version` answer without running anything:
+
+```sh run=cli
+jsrt --version
+```
+
+```text output=cli
+jsrt 1.0.0
+```
+
+## `jsrt supervise <FILE>` — its own flags
+
+All `run` flags apply, plus:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--max-rss-mb <n>` | — | Resident-footprint ceiling in MiB; over it the worker dies. |
+| `--max-cpu <s>` | — | CPU-seconds ceiling via `RLIMIT_CPU` (SIGXCPU). |
+| `--wall-ms <ms>` | `0` | Wall backstop for the whole supervised run; `0` relies on the worker's `--timeout`. |
+| `--kill-grace-ms <ms>` | `500` | Grace between SIGTERM and SIGKILL. |
+| `--report <path>` | stdout | Append the JSON run report to this file instead. |
+| `--report-max-kb <n>` | `512` | Report-file cap before it rotates to `<name>.1`. |
+| `--max-output-kb <n>` | `8192` | Per-stream bytes of worker output passed through; the rest is read and counted. With `--max-output-rate-kbs` this is the burst. |
+| `--max-output-rate-kbs <n>` | `0` | Sustained worker output in KiB/s past the burst; `0` makes the cap a lifetime budget. |
+| `--prefix-stdout` | off | Prefix each worker stdout line with the run id, as stderr already gets. |
+| `--redact-env <NAME>` | — | Mask the value of this environment variable in forwarded output. Repeatable. Never argv: the literal itself stays out of `ps`. |
+| `--redact-file <path>` | — | Mask each non-empty line of this file. Refused if group/world-readable. Repeatable. |
+| `--output-raw` | off | Pass worker bytes untouched — no run-id prefix, no terminal neutralisation. Trusted workers only. |
+
+## Exit codes
+
+Every way a run ends maps to exactly one code — classify, never stringify. The demos below produce
+each one for real:
+
+**0 — clean.** The script ran to completion:
+
+```js title="ok.js" run=cli file=ok.js
+rt.print("done\n");
+```
+
+```sh run=cli
+jsrt run ok.js
+```
+
+```text output=cli
+done
+```
+
+**2 — usage.** Clap refused the arguments — a bad flag, a missing value, a malformed number. No
+script was ever involved:
+
+```sh run=cli exit=2 stderr=1
+jsrt run --nope ok.js
+```
+
+```text output=cli
+error: unexpected argument '--nope' found
+
+  tip: to pass '--nope' as a value, use '-- --nope'
+
+Usage: jsrt run [OPTIONS] <FILE>
+
+For more information, try '--help'.
+```
+
+**3 — load.** The entry point could not be resolved or read — the script never existed as far as V8
+is concerned:
+
+```sh run=cli exit=3 stderr=1
+jsrt run nope.js
+```
+
+```text output=cli
+jsrt: load: no such file: nope.js
+```
+
+**4 — syntax.** The source was read but did not compile:
+
+```js title="bad.js" run=cli file=bad.js
+const x = (
+```
+
+```sh run=cli exit=4 stderr=1
+jsrt run bad.js
+```
+
+```text output=cli
+jsrt: syntax: SyntaxError: Unexpected end of input
+```
+
+**5 — exception.** The script ran and threw uncaught (or its top-level promise rejected):
+
+```js title="throw.js" run=cli file=throw.js
+throw new Error("boom");
+```
+
+```sh run=cli exit=5 stderr=1
+jsrt run throw.js
+```
+
+```text output=cli
+jsrt: exception: Error: boom
+```
+
+**6 — terminated.** The timeout watchdog or V8 itself stopped the isolate — not a script error:
+
+```js title="sleepy.js" run=cli file=sleepy.js
+await rt.sleep(60_000);
+```
+
+```sh run=cli exit=6 stderr=1
+jsrt run sleepy.js --timeout 60
+```
+
+```text output=cli
+jsrt: terminated: execution terminated by timeout watchdog
+```
+
+**7 — capability.** An op refused a grant the manifest did not declare. A script can catch the
+`CapabilityError`; uncaught it surfaces here:
+
+```js title="denied.js" run=cli file=denied.js
+await rt.fetch("https://app.example.com/");
+```
+
+```sh run=cli exit=7 stderr=1
+jsrt run denied.js
+```
+
+```text output=cli
+jsrt: capability: CapabilityError: CapabilityError: fetch denied: app.example.com:443 is not a declared net destination
+```
+
+(The doubled `CapabilityError:` is real output — the error class and the thrown error's own name
+both print. The page shows what the binary writes.)
+
+**8 — host.** The host itself failed: a broken manifest, an unreadable flag path, an internal
+error. Never a script error:
+
+```json title="bad.json" run=cli file=bad.json
+{bad json
+```
+
+```sh run=cli exit=8 stderr=1
+jsrt run ok.js --manifest bad.json
+```
+
+```text output=cli
+jsrt: host: invalid manifest bad.json: key must be a string at line 1 column 2
+```
+
+## Shell integration
+
+The codes compose: `jsrt run x.js || echo failed` sees `0` only on a clean run, a timeout is never
+confused with a throw, and a denied capability is never confused with a crash. Under
+[`jsrt supervise`](/self-hosting/supervise/) the same codes appear in the report's `outcome` and
+`exit_code`, with `signal` and `killed_by` saying who ended a terminated run.

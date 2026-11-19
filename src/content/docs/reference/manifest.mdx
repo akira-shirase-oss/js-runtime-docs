@@ -1,0 +1,115 @@
+---
+title: The capability manifest
+description: Every grant a run may declare — read, net, kv, media, serve — and how the flags join it.
+sidebar:
+  order: 3
+---
+
+This page runs on this machine — its examples execute against the real binary on loopback
+addresses.
+
+A run's capabilities come from a JSON manifest passed with `--manifest`. **Absent means deny-all:**
+a script with no manifest can compute and print, and nothing else. Every section is deny-by-default
+in both directions — a key the schema does not know is an error, so a misspelt bound
+(`"max_byte"`) can never quietly become the default.
+
+```json title="jsrt.manifest.json" run=cli file=manifest-demo.json
+{
+  "read": ["."],
+  "net": ["127.0.0.1:47421", {"host": "localhost:47421", "private": true}],
+  "kv": { "path": "app.kv", "max_bytes": 67108864 },
+  "media": { "backend": "local", "root": "media/", "max_bytes": 268435456 },
+  "serve": { "host": "127.0.0.1", "port": 47421, "max_body": 8388608 }
+}
+```
+
+An unknown key fails fast — exit 8, naming the key, before the script ever runs:
+
+```json title="misspelt.json" run=cli file=misspelt.json
+{"net": ["127.0.0.1:47421"], "readx": ["."]}
+```
+
+```sh run=cli exit=8 stderr=1
+jsrt run ok.js --manifest misspelt.json
+```
+
+```text output=cli
+jsrt: host: invalid manifest misspelt.json: unknown field `readx`, expected one of `read`, `net`, `kv`, `media`, `serve` at line 1 column 36
+```
+
+## `read` — directories a script may read beneath
+
+```json not-run="a manifest section, not a complete document"
+"read": ["conf", "data/in.json"]
+```
+
+- Paths resolve **relative to the manifest file**, canonicalized — `..` and symlinks can't slip
+  out. A symlink that resolves inside the fence is in; one that leaves is out.
+- Grants `rt.readText`, `rt.media.put`'s source file, and data imports (`with { type: ... }`).
+- `.js`/`.mjs` modules are different: they live in the entry's own directory plus declared read
+  paths — see [files and modules](/guides/files-and-modules/).
+
+## `net` — destinations `rt.fetch` may reach
+
+```json not-run="a manifest section, not a complete document"
+"net": ["api.example.com", "app.example.com:443", "127.0.0.1:47421",
+        {"host": "localhost:47421", "private": true}]
+```
+
+- A bare `host` allows any port; `host:port` requires an exact match. Comparison is normalised
+  (case, trailing DNS dot, IPv6 brackets).
+- **A name grant reaches public addresses only.** If the name resolves to loopback, private,
+  link-local (including `169.254.169.254`), CGNAT or reserved space, the fetch is refused — opt in
+  per destination with `{"host": ..., "private": true}` or `--net-private`. IP literals don't
+  resolve, so they match exactly what was written.
+- An object entry's keys are exactly `host` and `private` — anything else is a manifest error.
+
+## `kv` — the embedded store
+
+```json not-run="a manifest section, not a complete document"
+"kv": { "path": "app.kv", "max_bytes": 67108864 }
+```
+
+- `path` — the SQLite file, resolved relative to the manifest (created on demand).
+- `max_bytes` — quota on the database file's own size. Default 64 MiB.
+
+## `media` — the content-addressed store
+
+```json not-run="a manifest section, not a complete document"
+"media": { "backend": "local", "root": "media/", "max_bytes": 268435456 }
+```
+
+- `backend` — only `"local"` ships today; anything else is a manifest error, not a silent fallback.
+- `root` — where uploads land, resolved relative to the manifest.
+- `max_bytes` — per-upload cap. Default 256 MiB.
+
+## `serve` — the HTTP listener
+
+```json not-run="a manifest section, not a complete document"
+"serve": { "host": "127.0.0.1", "port": 47421, "max_body": 8388608, "max_connections": 256,
+           "header_timeout_ms": 10000, "body_timeout_ms": 30000, "write_timeout_ms": 30000,
+           "response_timeout_ms": null, "body_first_byte_ms": 5000, "body_min_rate": 65536 }
+```
+
+- `host` must be an IP literal and loopback — v1 does not bind public addresses, and `localhost`
+  names don't get a say. `port` is required.
+- `max_body` — per-request body cap (over → 413 before the handler runs). Default 8 MiB, at most
+  1 GiB.
+- `max_connections` — concurrent connections; past it a newcomer gets a fast 503. Default 256,
+  at most 65536.
+- `header_timeout_ms` — deadline for the request line+headers (hyper also caps them at 16 KiB →
+  431). Default 10 s.
+- `body_timeout_ms` — a body that stalls is answered 408. Default 30 s.
+- `write_timeout_ms` — a response write that makes no progress. Default 30 s.
+- `response_timeout_ms` — optional bound on a whole response (`null` default).
+- `body_first_byte_ms` / `body_min_rate` — a body past its free 64 KiB share must send a byte within
+  this grace and then average this rate (default 5 s / 64 KiB/s) or it is answered 408 and lets go
+  of the connection's byte budget.
+
+## Flags join, never replace
+
+`--read`, `--net`, `--net-private`, `--kv`, `--media-root`, `--serve` each *join* the manifest's
+grants — a script can't shrink the manifest, and the flags can't either. For quotas a manifest line
+wins: `--kv-max-mb` applies only when the store came from `--kv`. `jsrt supervise` re-serializes the
+whole contract to the worker it spawns, so a supervised script runs under exactly what the operator
+asked.

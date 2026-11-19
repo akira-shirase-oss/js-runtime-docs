@@ -25,6 +25,7 @@ export const ALLOWED = [
 	/^src\/content\/docs\/self-hosting\//, // listen addresses, local health checks, supervise demos
 	/^src\/content\/docs\/reference\/cli\.mdx$/, // exit-code demos run jsrt on this machine
 	/^src\/content\/docs\/reference\/manifest\.mdx$/, // a serve grant is always a loopback literal
+	/^src\/content\/docs\/reference\/errors\.mdx$/, // a real refusal line contains the loopback address it named
 ];
 const LOCAL = /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[?::1)/;
 const PRIVATE_V4 = /^https?:\/\/(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/;

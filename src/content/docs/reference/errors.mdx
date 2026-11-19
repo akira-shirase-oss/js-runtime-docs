@@ -1,0 +1,76 @@
+---
+title: Errors
+description: How jsrt classifies every way a run can end — HostError classes, exit codes, and the refusal contract.
+sidebar:
+  order: 4
+---
+
+jsrt's rule is *classify, don't stringify*: every way a run ends is a distinct `HostError` variant
+with its own exit code, so a caller never has to string-match stderr to learn what happened. A
+script sees the same taxonomy as named errors it can catch and match.
+
+## The classes
+
+| `HostError` | Exit | What it means |
+|---|---|---|
+| `Load` | 3 | The entry point could not be resolved or read. The script never existed. |
+| `Syntax` | 4 | The source was read but did not compile. |
+| `Exception` | 5 | The script ran and threw uncaught, or its top-level promise rejected. |
+| `Terminated` | 6 | The timeout watchdog or V8 itself stopped the isolate. Not a script error. |
+| `Capability` | 7 | An op refused a grant the manifest did not declare. |
+| `Host` | 8 | The host itself failed — a broken manifest, an unreadable path, an internal error. |
+| — | 2 | Usage: clap refused the arguments before any run existed. |
+| — | 0 | Clean. |
+
+`Syntax` and `Exception` are deliberately separate — a script that never compiled is not a script
+that ran and threw. The demos on the [CLI page](/reference/cli/) produce each code for real.
+
+## What a refusal says — and what it never says
+
+Every `CapabilityError` names **what the script asked for**, and never more:
+
+```text not-run="message shapes; each is exercised live on the CLI and guide pages"
+read denied: config.json is missing or outside every declared read path
+fetch denied: app.example.com:443 is not a declared net destination
+fetch denied: localhost:47423 resolves only to addresses that are loopback, private or otherwise not a public address — a name grant reaches public hosts only; opt this name in with {"host": ..., "private": true} or --net-private, or grant the address itself (ip:port)
+kv denied: no store declared in the manifest
+media denied: no store declared in the manifest
+serve denied: no listener declared in the manifest
+import denied: secrets.txt is outside every declared read path
+import denied: https: imports are not supported; modules load from local files only
+```
+
+A refusal answers alike whether or not anything exists at the path — a script cannot use the
+sandbox's denials as an existence oracle for host files. The host:port the fetch asked for appears;
+a resolved address, a canonical host path or the grant list never does.
+
+## Catching a refusal
+
+Inside the script a denial is a `CapabilityError` — match on `e.name`, and a refused call stays a
+refusal (a fetch's own network failure stays an ordinary `Error`):
+
+```js title="caught.js" run=cli file=caught.js
+try {
+	await rt.fetch("https://app.example.com/");
+} catch (e) {
+	rt.print(`caught ${e.name}: ${String(e.message).slice(0, 40)}...\n`);
+	rt.print(`it is a refusal: ${e.name === "CapabilityError"}\n`);
+}
+rt.print("run continues — a caught refusal is not an exit\n");
+```
+
+```sh run=cli
+jsrt run caught.js
+```
+
+```text output=cli
+caught CapabilityError: fetch denied: app.example.com:443 is not...
+it is a refusal: true
+run continues — a caught refusal is not an exit
+```
+
+## Under supervision
+
+`jsrt supervise` reports the same taxonomy one level up: the report's `outcome` is the class name
+(`"clean"`, `"exception"`, `"capability"`, `"terminated"`, `"host"`), `exit_code` the number, and a
+signal death adds `signal` plus `killed_by` — the budget or the operator that ended it, not a guess.
