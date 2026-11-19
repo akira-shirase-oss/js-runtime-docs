@@ -1,0 +1,74 @@
+{
+  "rt": [
+    "clearInterval",
+    "clearTimeout",
+    "fetch",
+    "hostInfo",
+    "kv",
+    "kv.delete",
+    "kv.get",
+    "kv.list",
+    "kv.put",
+    "media",
+    "media.put",
+    "media.stat",
+    "now",
+    "pendingTimers",
+    "print",
+    "readText",
+    "refTimer",
+    "serve",
+    "setInterval",
+    "setTimeout",
+    "sleep",
+    "unrefTimer"
+  ],
+  "cli": {
+    "run": [
+      "--fetch-timeout",
+      "--kv",
+      "--kv-max-mb",
+      "--manifest",
+      "--max-heap-mb",
+      "--media-max-mb",
+      "--media-root",
+      "--net",
+      "--net-private",
+      "--read",
+      "--serve",
+      "--timeout"
+    ],
+    "supervise": [
+      "--kill-grace-ms",
+      "--max-cpu",
+      "--max-output-kb",
+      "--max-output-rate-kbs",
+      "--max-rss-mb",
+      "--output-raw",
+      "--prefix-stdout",
+      "--redact-env",
+      "--redact-file",
+      "--report",
+      "--report-max-kb",
+      "--wall-ms"
+    ]
+  },
+  "manifest": {
+    "top": ["kv", "media", "net", "read", "serve"],
+    "net": ["host", "private"],
+    "kv": ["max_bytes", "path"],
+    "media": ["backend", "max_bytes", "root"],
+    "serve": [
+      "body_first_byte_ms",
+      "body_min_rate",
+      "body_timeout_ms",
+      "header_timeout_ms",
+      "host",
+      "max_body",
+      "max_connections",
+      "port",
+      "response_timeout_ms",
+      "write_timeout_ms"
+    ]
+  }
+}
