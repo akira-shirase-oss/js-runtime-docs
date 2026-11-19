@@ -1,0 +1,129 @@
+---
+title: Serving HTTP
+description: rt.serve — the request/response contract, every limit, and how the loop ends.
+---
+
+This page runs on this machine — the listener is a real socket on `127.0.0.1`.
+
+`rt.serve(options, handler)` starts an HTTP listener and returns `{done, close}` **immediately** —
+it never blocks the script. `options.host` must be a loopback IP literal granted in the manifest
+(v1 never binds a public address); `options.port` must equal the grant.
+
+```json title="serve-manifest.json" run=serve file=serve-manifest.json
+{"serve": {"host": "127.0.0.1", "port": 47425, "max_body": 1048576,
+           "max_connections": 8, "body_first_byte_ms": 2000}}
+```
+
+```js title="svc.js" run=serve file=svc.js
+const server = rt.serve({ host: "127.0.0.1", port: 47425 }, (req) => {
+	if (req.path === "/hello") {
+		return { status: 200, headers: { "content-type": "application/json" }, body: `{"hello":"world"}` };
+	}
+	if (req.path === "/echo") {
+		return { status: 200, body: `${req.method} ${req.path}: ${req.body}` };
+	}
+	if (req.path === "/boom") {
+		throw new Error("handler failed");
+	}
+	if (req.path === "/who") {
+		const who = req.headers.filter(([k]) => k.toLowerCase() === "x-who").map(([, v]) => v);
+		return { status: 200, body: `x-who seen ${who.length}x: ${who.join(",")}` };
+	}
+	return { status: 404, body: "not found" };
+});
+rt.print("listening\n");
+await server.done;
+```
+
+```sh run=serve
+jsrt run svc.js --manifest serve-manifest.json --timeout 0 >svc.log 2>&1 &
+SRV=$!
+for i in $(seq 1 50); do curl -sf http://127.0.0.1:47425/hello >/dev/null 2>&1 && break; sleep 0.1; done
+```
+
+```sh run=serve
+curl -s http://127.0.0.1:47425/hello && echo
+curl -s -X POST -d 'payload here' http://127.0.0.1:47425/echo && echo
+curl -s -H 'x-who: dev' http://127.0.0.1:47425/who && echo
+curl -s -o /dev/null -w '%{http_code} (404 path)\n' http://127.0.0.1:47425/elsewhere
+```
+
+```text output=serve
+{"hello":"world"}
+POST /echo: payload here
+x-who seen 1x: dev
+404 (404 path)
+```
+
+## The contract
+
+- `req` is `{method, path, headers, body}` — `headers` an **array of `[name, value]` pairs** (a
+  request can repeat a name; a map would drop one).
+- A handler returns `{status?, headers?, body?}` — headers as a map, and an **array value repeats
+  the header line** (set-cookie needs one line per cookie).
+- `server.done` resolves when the listener fully closes; `server.close()` stops it — the run's
+  timeout backstop still bounds an `await server.done`.
+
+## A throw is a 500, not a dead loop
+
+A handler that throws answers 500 and the listener keeps serving — one bad request can't take the
+loop down:
+
+```sh run=serve
+curl -s -o /dev/null -w '%{http_code} after the throw\n' http://127.0.0.1:47425/boom
+curl -s -o /dev/null -w '%{http_code} still alive\n' http://127.0.0.1:47425/hello
+```
+
+```text output=serve
+500 after the throw
+200 still alive
+```
+
+## Limits are answered, not crashed
+
+Every bound answers with an honest status — the loop stays up for the next client:
+
+- **Body cap** (`max_body`, default 8 MiB, at most 1 GiB): `Content-Length` over it gets a 413
+  *before* the handler runs; a body that overflows while streaming gets the same.
+- **Connection cap** (`max_connections`, default 256, at most 65536): past it, a newcomer gets a
+  fast 503 rather than queue forever.
+- **Header time/size** (`header_timeout_ms`, default 10 s; hyper's 16 KiB header cap → 431).
+- **Body pace** (`body_first_byte_ms` default 5 s, `body_min_rate` default 64 KiB/s after a free
+  64 KiB share): a body that stalls answers 408. `body_timeout_ms` (default 30 s) bounds the whole
+  body; `write_timeout_ms` (default 30 s) a stalled response write; `response_timeout_ms`
+  (optional) the whole response.
+
+```sh run=serve
+head -c 2000000 /dev/zero | curl -s -o /dev/null -w '%{http_code}\n' --data-binary @- http://127.0.0.1:47425/echo
+curl -s -o /dev/null -w '%{http_code} still up after the oversized body\n' http://127.0.0.1:47425/hello
+```
+
+```text output=serve
+413
+200 still up after the oversized body
+```
+
+(The full matrix — 408s, 431s, the connection-cap 503, slow-client eviction — is exercised by the
+product's `tests/serve.rs`; these demos show the shape.)
+
+## Ending the loop
+
+`server.close()` stops accepting; `server.done` resolves, the run exits 0:
+
+```js title="svc-close.js" run=serve file=svc-close.js
+const server = rt.serve({ host: "127.0.0.1", port: 47425 }, () => ({ status: 200, body: "ok" }));
+rt.print("up\n");
+rt.setTimeout(() => server.close(), 300);
+await server.done;
+rt.print("down — done resolved\n");
+```
+
+```sh run=serve
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; sleep 0.2
+jsrt run svc-close.js --manifest serve-manifest.json
+```
+
+```text output=serve
+up
+down — done resolved
+```

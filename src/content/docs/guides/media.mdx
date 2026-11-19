@@ -1,0 +1,58 @@
+---
+title: Media uploads
+description: rt.media — content-addressed storage, bounded uploads, honest refusals.
+---
+
+This page runs on this machine — the store is a real directory under the demo directory.
+
+`rt.media` is a content-addressed store: `put` streams a **read-granted** source file into the
+store under its sha256 name — never a whole-file buffer, and a mid-upload failure cleans its
+partial. It needs two grants: `media` for the store and `read` for the source path.
+
+```json title="media-manifest.json" run=media file=media-manifest.json
+{"read": ["."], "media": {"backend": "local", "root": "store/", "max_bytes": 268435456}}
+```
+
+```js title="uploader.js" run=media file=uploader.js
+const put = await rt.media.put("photo.txt");
+rt.print(`put: ${JSON.stringify(put)}\n`);
+rt.print(`stat: ${JSON.stringify(await rt.media.stat(put.name))}\n`);
+rt.print(`missing: ${JSON.stringify(await rt.media.stat("0".repeat(64)))}\n`);
+```
+
+```sh run=media
+echo "a small payload" > photo.txt
+mkdir -p store
+jsrt run uploader.js --manifest media-manifest.json
+```
+
+```text output=media
+put: {"name":"b34c3f3a0c2f3d1f2e8c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b","bytes":16,"sha256":"b34c3f3a0c2f3d1f2e8c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b","state":"stored"}
+stat: {"name":"b34c3f3a0c2f3d1f2e8c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b","bytes":16}
+missing: null
+```
+
+- `put(srcPath)` → `{name, bytes, sha256, state: "stored"}` — `name` is the hex sha256, so the same
+  content lands at the same name every time.
+- `stat(name)` → `{name, bytes}` or `null`.
+- The source must be a regular file inside a `read` fence — the same refusal `rt.readText` gives,
+  and for the same reason (no existence oracle). `--media-root`/`--media-max-mb` grant without a
+  manifest, mirroring `--kv`.
+- `backend` is `"local"` only — anything else is a manifest error, not a silent fallback.
+- `max_bytes` caps a single upload (default 256 MiB via `--media-max-mb`).
+
+```js title="media-denied.js" run=media file=media-denied.js
+try {
+	await rt.media.put("../outside.txt");
+} catch (e) {
+	rt.print(`${e.message.split("\n")[0]}\n`);
+}
+```
+
+```sh run=media
+jsrt run media-denied.js --manifest media-manifest.json
+```
+
+```text output=media
+read denied: ../outside.txt is missing or outside every declared read path
+```

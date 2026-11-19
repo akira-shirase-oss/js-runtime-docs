@@ -1,0 +1,133 @@
+---
+title: Files and modules
+description: rt.readText inside the read fence, and which imports a script may make.
+---
+
+This page runs on this machine — paths are real files under the demo directory.
+
+## `rt.readText` — inside the fence, or not at all
+
+`rt.readText` reads a text file under a declared `read` path — a regular file only, at most 4 MiB.
+Every refusal reads the same, so a script can't learn what exists:
+
+```js title="reader.js" run=files file=reader.js
+rt.print(`granted file: ${(await rt.readText("note.txt")).trim()}\n`);
+for (const p of ["../outside.txt", "missing.txt", "/etc/hostname"]) {
+	try {
+		await rt.readText(p);
+		rt.print(`${p}: read (unexpected!)\n`);
+	} catch (e) {
+		rt.print(`${p}: ${e.message}\n`);
+	}
+}
+```
+
+```sh run=files
+echo "a readable note" > note.txt && echo "outside the fence" > ../outside.txt
+jsrt run reader.js --read .
+```
+
+```text output=files
+granted file: a readable note
+../outside.txt: read denied: ../outside.txt is missing or outside every declared read path
+missing.txt: read denied: missing.txt is missing or outside every declared read path
+/etc/hostname: read denied: /etc/hostname is missing or outside every declared read path
+```
+
+`--read .` granted the demo directory; everything else — a real file one directory up, a file that
+doesn't exist, a host file — is the same refusal. The path the script named appears; whether it
+exists never does. Symlinks resolve first: a link that lands inside the fence is in, one that
+leaves is refused like the rest.
+
+```js title="kinds.js" run=files file=kinds.js
+for (const p of [".", "big.bin"]) {
+	try {
+		await rt.readText(p);
+	} catch (e) {
+		rt.print(`${p}: ${e.message}\n`);
+	}
+}
+```
+
+```sh run=files
+head -c 4500000 /dev/zero | tr '\0' 'x' > big.bin
+jsrt run kinds.js --read .
+```
+
+```text output=files
+.: read denied: . is not a regular file
+big.bin: read denied: big.bin is 4500000 bytes (limit 4194304)
+```
+
+## Modules: local files only
+
+A script's imports resolve to `file:` and nothing else — `http:`, `https:`, `data:`, `blob:`,
+`node:`, `npm:` specifiers are all refused at resolve time:
+
+```js title="remote-import.js" run=files file=remote-import.js
+import * as m from "https://app.example.com/mod.js";
+```
+
+```sh run=files exit=7 stderr=1
+jsrt run remote-import.js
+```
+
+```text output=files
+jsrt: capability: import denied: https: imports are not supported; modules load from local files only
+```
+
+Two fences decide where a `file:` import may point:
+
+- **A JavaScript module** (`.js`/`.mjs`) may come from **the entry's own directory** — the operator
+  chose that program, its imports are its space — plus declared `read` paths.
+- **A data import** (`with { type: "text" | "bytes" | "json" }`, or any non-`.js`/`.mjs` file) is a
+  file read like `rt.readText`: a declared `read` path and the 4 MiB cap.
+
+So a sibling import works with no manifest at all — but only for `.js`/`.mjs`:
+
+```js title="helper.js" run=files file=helper.js
+export const greet = (name) => `hello ${name}`;
+```
+
+```js title="importer.js" run=files file=importer.js
+import { greet } from "./helper.js";
+rt.print(greet("from a module") + "\n");
+```
+
+```sh run=files
+jsrt run importer.js
+```
+
+```text output=files
+hello from a module
+```
+
+A data import needs the grant — same file, read by a script with no manifest, is refused:
+
+```js title="data-import.js" run=files file=data-import.js
+import note from "./note.txt" with { type: "text" };
+rt.print(note);
+```
+
+```sh run=files exit=7 stderr=1
+jsrt run data-import.js
+```
+
+```text output=files
+jsrt: capability: import denied: note.txt is outside every declared read path (the entry directory admits .js/.mjs modules only; text, bytes, JSON and other files need a declared read path)
+```
+
+```sh run=files
+jsrt run data-import.js --read .
+```
+
+```text output=files
+a readable note
+```
+
+:::caution[The entry-directory hole — documented, kept]
+`.js` and `.mjs` files under the entry directory are importable **without any read grant** — that
+is the program space, on purpose. It also means a script can tell which `.js`/`.mjs` files exist
+there (each import's refusal or success answers). Keep an entry in a directory of its own. See
+[Security](/self-hosting/security/).
+:::

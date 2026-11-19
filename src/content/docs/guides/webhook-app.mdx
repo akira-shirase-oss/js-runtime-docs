@@ -1,0 +1,126 @@
+---
+title: A webhook endpoint on jsrt
+description: Deploy, deduplicate, restart with data intact — the product's own example, exercised on this page.
+---
+
+This page runs on this machine — the abbreviated drill below runs for real against the product
+example (ported from `examples/webhook` to this worktree's port band; the product copy lives at
+`127.0.0.1:47411`).
+
+A webhook receiver is the honest shape of `rt.serve` + `rt.kv`: deduplicate by delivery id, store
+the body, survive a redeploy.
+
+```sh run=webhook
+mkdir -p webhook/data
+```
+
+```js title="webhook/app.js" run=webhook file=webhook/app.js
+// The webhook app — a real program on jsrt, using rt.serve + rt.kv.
+// Ported from the product's examples/webhook/app.js (port 47426 here, 47411 there).
+const server = rt.serve({ host: "127.0.0.1", port: 47426 }, async (req) => {
+	const path = req.path.split("?")[0];
+	if (path === "/health") {
+		return { status: 200, body: JSON.stringify({ ok: true, v: 1 }) };
+	}
+	if (!path.startsWith("/hooks/") || path.length <= 7) {
+		return { status: 404, body: "not found" };
+	}
+	const name = path.slice(7);
+	if (req.method === "POST") {
+		const id =
+			(req.headers.find(([k]) => k.toLowerCase() === "x-delivery-id") || [])[1] ||
+			String(rt.now());
+		const key = `hook/${name}/${id}`;
+		if (rt.kv.get(key) !== null) {
+			return { status: 200, body: "duplicate" };
+		}
+		rt.kv.put(key, req.body);
+		return { status: 201, body: `stored ${key}` };
+	}
+	if (req.method === "GET") {
+		const keys = rt.kv.list(`hook/${name}/`).map((e) => e.key);
+		return { status: 200, body: JSON.stringify(keys) };
+	}
+	return { status: 405, body: "method not allowed" };
+});
+
+rt.print("webhook v1 serving on 127.0.0.1:47426\n");
+await server.done;
+```
+
+```json title="jsrt.manifest.json" run=webhook file=webhook/jsrt.manifest.json
+{
+	"serve": { "host": "127.0.0.1", "port": 47426 },
+	"kv": { "path": "data/webhook.kv", "max_bytes": 8388608 }
+}
+```
+
+Two grants and nothing else — the listener, and an 8 MiB store file under `data/`.
+
+## Deploy
+
+```sh run=webhook
+rm -f webhook/data/webhook.kv
+jsrt run webhook/app.js --manifest webhook/jsrt.manifest.json --timeout 0 >webhook/app.log 2>&1 &
+SRV=$!
+for i in $(seq 1 50); do curl -sf http://127.0.0.1:47426/health && break; sleep 0.1; done
+echo
+```
+
+```text output=webhook
+{"ok":true,"v":1}
+```
+
+## Deliver — and deduplicate
+
+```sh run=webhook
+curl -s -X POST -H 'x-delivery-id: d1' -d '{"action":"opened"}' http://127.0.0.1:47426/hooks/github && echo
+curl -s -X POST -H 'x-delivery-id: d1' -d '{"action":"opened"}' http://127.0.0.1:47426/hooks/github && echo
+curl -s -X POST -H 'x-delivery-id: d2' -d '{"action":"closed"}' http://127.0.0.1:47426/hooks/github && echo
+curl -s http://127.0.0.1:47426/hooks/github && echo
+```
+
+```text output=webhook
+stored hook/github/d1
+duplicate
+stored hook/github/d2
+["hook/github/d1","hook/github/d2"]
+```
+
+The `x-delivery-id` header is the idempotency key — a repeated delivery answers `duplicate` and
+never writes twice. (Missing the header, the app falls back to `rt.now()`.)
+
+## Restart — data survives the process
+
+```sh run=webhook
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; sleep 0.3
+jsrt run webhook/app.js --manifest webhook/jsrt.manifest.json --timeout 0 >webhook/app.log 2>&1 &
+SRV=$!
+for i in $(seq 1 50); do curl -sf http://127.0.0.1:47426/health && break; sleep 0.1; done
+echo
+curl -s http://127.0.0.1:47426/hooks/github && echo
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true
+```
+
+```text output=webhook
+{"ok":true,"v":1}
+["hook/github/d1","hook/github/d2"]
+```
+
+The KV file outlives the process — same manifest, same store, next run sees the deliveries.
+
+## The full drill — `not-run` here
+
+The product's `examples/webhook/drill.sh` goes further — deploy, then an *update* to a v2 file
+(`health` answers `"v":2` with the data intact), then a deliberately broken build (the wire still
+answers 500), an inspection of the `jsrt supervise` JSONL report, and a rollback to v1. It runs
+about two minutes of real supervision and respawning — longer than a page's budget:
+
+```sh not-run="takes ~2 minutes of supervised deploy/break/rollback; its committed transcript is evidence"
+cd examples/webhook && ./drill.sh
+```
+
+The committed transcript is in the product repository at `examples/webhook/drill.log` — it shows
+the deploy, the dedup, the survived update, the 500s under the broken handler, 12 report records
+(`"killed_by":"operator-sigterm"` on each respawn — supervision doing its job), and a clean
+rollback. This page's abbreviated version covers deploy → dedup → list → restart and runs in CI.

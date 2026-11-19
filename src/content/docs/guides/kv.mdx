@@ -1,0 +1,99 @@
+---
+title: The KV store
+description: rt.kv — an embedded SQLite store behind the manifest's kv line.
+---
+
+This page runs on this machine — the store is a real file under the demo directory.
+
+`rt.kv` is an embedded key-value store (SQLite on one file). It's synchronous on purpose — a local
+file answers in microseconds — and every call needs the `kv` grant, by manifest or `--kv`.
+
+```js title="kv-app.js" run=kv file=kv-app.js
+rt.kv.put("user/alice", JSON.stringify({ visits: 1 }));
+rt.kv.put("user/bob", JSON.stringify({ visits: 3 }));
+rt.kv.put("session/tmp", "ephemeral");
+
+rt.print(`alice: ${rt.kv.get("user/alice")}\n`);
+rt.print(`nobody: ${rt.kv.get("user/nobody")}\n`);
+rt.print(`deleted tmp: ${rt.kv.delete("session/tmp")}\n`);
+rt.print(`deleted tmp again: ${rt.kv.delete("session/tmp")}\n`);
+rt.print(`under user/: ${JSON.stringify(rt.kv.list("user/"))}\n`);
+```
+
+```sh run=kv
+rm -f app.kv
+jsrt run kv-app.js --kv ./app.kv
+```
+
+```text output=kv
+alice: {"visits":1}
+nobody: null
+deleted tmp: true
+deleted tmp again: false
+under user/: [{"key":"user/alice","value":"{\"visits\":1}"},{"key":"user/bob","value":"{\"visits\":3}"}]
+```
+
+- `get` → the value, or `null` on a miss (a `null` is the honest miss).
+- `put` → upsert; throws `CapabilityError` past the file-size quota.
+- `delete` → whether anything was removed.
+- `list(prefix, limit?)` → `[{key, value}]` under an exact prefix, key-sorted, default limit 1000.
+
+The store persists between runs — same file, next run sees it:
+
+```js title="kv-again.js" run=kv file=kv-again.js
+rt.print(`alice, next run: ${rt.kv.get("user/alice")}\n`);
+```
+
+```sh run=kv
+jsrt run kv-again.js --kv ./app.kv
+```
+
+```text output=kv
+alice, next run: {"visits":1}
+```
+
+## The quota is the file's own size
+
+`max_bytes` budgets what the operator actually limits — the `.kv` file. A write whose projection
+(file bytes + payload + a page of slack) crosses it is refused; `--kv-max-mb` (default 64) is the
+quota only when the grant came from `--kv` — a manifest `"max_bytes"` wins. Force a tiny quota and
+the refusal shows the accounting:
+
+```json title="tiny-kv.json" run=kv file=tiny-kv.json
+{"kv": {"path": "./tiny.kv", "max_bytes": 200}}
+```
+
+```js title="kv-quota.js" run=kv file=kv-quota.js
+try {
+	rt.kv.put("k", "v".repeat(500));
+} catch (e) {
+	rt.print(`${e.message.split("\n")[0]}\n`);
+}
+```
+
+```sh run=kv
+rm -f tiny.kv
+jsrt run kv-quota.js --manifest tiny-kv.json
+```
+
+```text output=kv
+kv quota exceeded: the store is 0B; this write projects 4597B over the 200B grant
+```
+
+## No grant, no store
+
+```js title="kv-denied.js" run=kv file=kv-denied.js
+try {
+	rt.kv.get("k");
+} catch (e) {
+	rt.print(`${e.message.split("\n")[0]}\n`);
+}
+```
+
+```sh run=kv
+jsrt run kv-denied.js
+```
+
+```text output=kv
+kv denied: no store declared in the manifest
+```

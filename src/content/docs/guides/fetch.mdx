@@ -1,0 +1,149 @@
+---
+title: Fetching with rt.fetch
+description: The capability-gated, deadline'd, body-capped GET — and what its refusals teach.
+---
+
+This page runs on this machine — the demo listener is on `127.0.0.1`, where every example is real.
+
+`rt.fetch` is a **GET-only** client in v1: one URL, one deadline over the whole exchange, a bounded
+body. Anything else — a method, a header, a request body — is out of scope today; that's what
+`rt.serve`'s peer side is for.
+
+```js title="fetcher.js" run=fetch file=fetcher.js
+const res = await rt.fetch("http://127.0.0.1:47423/hello");
+rt.print(`status ${res.status} (${res.statusText}), ${res.bytes} bytes in ${res.durationMs}ms\n`);
+rt.print(res.body + "\n");
+```
+
+The result: `{status, statusText, body, bytes, durationMs}` — `body` decoded as text, `bytes` the
+wire count.
+
+## Only what the manifest names
+
+A fetch to anything the manifest didn't declare is refused before any I/O — the same contract the
+quick start shows for `app.example.com`. Grants take strings (`"127.0.0.1:47423"` or
+`"api.example.com"`) or private-opt-in objects. For the demo below, the manifest grants the
+listener:
+
+```json title="fetch-manifest.json" run=fetch file=fetch-manifest.json
+{"net": ["127.0.0.1:47423"], "serve": {"host": "127.0.0.1", "port": 47423}}
+```
+
+```js title="fetch-server.js" run=fetch file=fetch-server.js
+const server = rt.serve({ host: "127.0.0.1", port: 47423 }, (req) => {
+	if (req.path === "/hello") return { status: 200, body: "hi from fetch" };
+	if (req.path === "/moved") return { status: 302, headers: { location: "/hello" }, body: "" };
+	return { status: 404, body: "not found" };
+});
+rt.print("up\n");
+await server.done;
+```
+
+```sh run=fetch
+jsrt run fetch-server.js --manifest fetch-manifest.json --timeout 0 >fetch-server.log 2>&1 &
+SRV=$!
+for i in $(seq 1 50); do curl -sf http://127.0.0.1:47423/hello >/dev/null 2>&1 && break; sleep 0.1; done
+```
+
+```sh run=fetch
+jsrt run fetcher.js --manifest fetch-manifest.json
+```
+
+```text output=fetch
+status 200 (OK), 13 bytes in 1.2ms
+hi from fetch
+```
+
+## Redirects are re-checked
+
+Every hop is checked against the grant, not just the first — a redirect can't smuggle a fetch to an
+undeclared destination. `/moved` 302s to `/hello`, same listener, so it lands:
+
+```js title="redirect.js" run=fetch file=redirect.js
+const res = await rt.fetch("http://127.0.0.1:47423/moved");
+rt.print(`after the redirect: ${res.status} ${res.body}\n`);
+```
+
+```sh run=fetch
+jsrt run redirect.js --manifest fetch-manifest.json
+```
+
+```text output=fetch
+after the redirect: 200 hi from fetch
+```
+
+Redirect to a port the manifest does not grant and the refusal names the *destination it would
+have reached*:
+
+```js title="redirect-refused.js" run=fetch file=redirect-refused.js
+try {
+	await rt.fetch("http://127.0.0.1:47423/away");
+} catch (e) {
+	rt.print(`${e.name}: ${e.message}\n`);
+}
+```
+
+```js title="away-server.js" run=fetch file=away-server.js
+const server = rt.serve({ host: "127.0.0.1", port: 47423 }, (req) =>
+	req.path === "/away"
+		? { status: 302, headers: { location: "http://127.0.0.1:47424/elsewhere" }, body: "" }
+		: { status: 404, body: "no" });
+await server.done;
+```
+
+```sh run=fetch exit=0 stderr=1
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true; sleep 0.2
+jsrt run away-server.js --manifest fetch-manifest.json --timeout 0 >away-server.log 2>&1 &
+SRV=$!
+for i in $(seq 1 50); do curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:47423/away | grep -q 302 && break; sleep 0.1; done
+jsrt run redirect-refused.js --manifest fetch-manifest.json
+```
+
+```text output=fetch
+CapabilityError: redirect refused: capability: fetch denied: 127.0.0.1:47424 is not a declared net destination
+```
+
+(More than 10 redirects is its own error — `more than 10 redirects`.)
+
+## A name grant reaches public addresses only
+
+`localhost` is a name, and it resolves to loopback — so `"localhost"` in `net` grants *nothing
+useful* unless you opt the name into private resolution. The refusal explains the opt-in:
+
+```js title="localhost.js" run=fetch file=localhost.js
+try {
+	await rt.fetch("http://localhost:47423/hello");
+} catch (e) {
+	rt.print(`${e.message.split("\n")[0]}\n`);
+}
+```
+
+```json title="name-manifest.json" run=fetch file=name-manifest.json
+{"net": ["localhost"], "serve": {"host": "127.0.0.1", "port": 47423}}
+```
+
+```sh run=fetch
+jsrt run localhost.js --manifest name-manifest.json
+```
+
+```text output=fetch
+fetch denied: localhost resolves only to addresses that are loopback, private or otherwise not a public address — a name grant reaches public hosts only; opt this name in with {"host": ..., "private": true} or --net-private, or grant the address itself (ip:port)
+```
+
+Opt in — `{"host": "localhost:47423", "private": true}` in the manifest, or `--net-private
+localhost:47423` on the command line — and the same fetch works. IP literals need no opt-in: they
+never resolve, so `127.0.0.1:47423` is always exactly what was written. This is also why
+environment proxies are ignored outright: a proxy connects and resolves *for* you, which would end
+the grant's meaning.
+
+## Bounds
+
+- **Deadline:** `--fetch-timeout`, default the built-in 10 s. The whole exchange — connect,
+  redirects, body — lives inside it.
+- **Body:** at most 4 MiB materialized; the cap counts bytes read, not a declared length.
+- **Concurrency:** at most 32 exchanges in flight; the rest queue inside the runtime.
+- **Wall clock:** the run's `--timeout` still bounds everything, fetches included.
+
+```sh run=fetch
+kill "$SRV" 2>/dev/null || true; wait "$SRV" 2>/dev/null || true
+```
