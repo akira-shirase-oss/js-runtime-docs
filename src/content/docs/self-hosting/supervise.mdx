@@ -1,0 +1,115 @@
+---
+title: Running under jsrt supervise
+description: The supervisor — budgets, forwarded signals, the JSONL report, redaction and output caps.
+---
+
+This page runs on this machine — every supervise run below is real.
+
+`jsrt supervise` spawns the script in a **worker process** and watches it: CPU by rlimit, resident
+memory by footprint polling, a wall-clock backstop, bounded and neutralised output, and a JSON
+report of how it ended. Signals you send the supervisor forward to the worker — the stderr line
+`jsrt: supervise: worker <pid> running, signals forwarded` is the readiness marker; wait for it,
+never for a sleep.
+
+```js title="svc-worker.js" run=supervise file=svc-worker.js
+rt.print("worker says hi\n");
+```
+
+```sh run=supervise
+jsrt supervise svc-worker.js 2>supervise.stderr
+cat supervise.stderr
+```
+
+```text output=supervise
+worker says hi
+{"run_id":"1795055840306x63851","outcome":"clean","exit_code":0,"worker_pid":63857,"wall_ms":25,"cpu_ms":12,"peak_rss_bytes":21282816,"limits":{"max_rss_bytes":null,"max_cpu_secs":null,"wall_ms":null},"killed_by":null,"signal":null,"poll_interval_ms":25,"output":{"max_bytes_per_stream":8388608,"rate_bytes_per_sec":0,"redact_literals":0,"stdout_bytes":15,"stdout_dropped_bytes":0,"stdout_tail_bytes":0,"stdout_redacted_bytes":0,"stderr_bytes":0,"stderr_dropped_bytes":0,"stderr_tail_bytes":0,"stderr_redacted_bytes":0,"raw_passthrough":false,"tty_neutralised":{"stdout":false,"stderr":false}}}
+jsrt: supervise: worker 63857 running, signals forwarded
+```
+
+```sh run=supervise
+# (the worker's stdout and the report came on stdout — shown next)
+jsrt supervise svc-worker.js 2>/dev/null
+```
+
+```text output=supervise
+worker says hi
+{"run_id":"1795055840341x63863","outcome":"clean","exit_code":0,"worker_pid":63864,"wall_ms":31,"cpu_ms":12,"peak_rss_bytes":21266432,"limits":{"max_rss_bytes":null,"max_cpu_secs":null,"wall_ms":null},"killed_by":null,"signal":null,"poll_interval_ms":25,"output":{"max_bytes_per_stream":8388608,"rate_bytes_per_sec":0,"redact_literals":0,"stdout_bytes":15,"stdout_dropped_bytes":0,"stdout_tail_bytes":0,"stdout_redacted_bytes":0,"stderr_bytes":0,"stderr_dropped_bytes":0,"stderr_tail_bytes":0,"stderr_redacted_bytes":0,"raw_passthrough":false,"tty_neutralised":{"stdout":false,"stderr":false}}}
+```
+
+The last stdout line is the report (or append it to a file with `--report <path>` — bounded by
+`--report-max-kb`, rotating to `<name>.1` with a rotation metadata line). Worker output comes
+first, byte-exact on stdout, stderr prefixed `[run <run_id>]` — unless `--output-raw`/`--prefix-stdout`.
+
+## The budgets — and who killed whom
+
+`--max-rss-mb` (footprint polling every `poll_interval_ms`), `--max-cpu` (CPU seconds via
+`RLIMIT_CPU` → SIGXCPU), `--wall-ms` (deadline for the whole supervised run), `--kill-grace-ms`
+(default 500 ms between SIGTERM and SIGKILL). When a budget ends the worker, the report says so —
+never a guess:
+
+```js title="looper.js" run=supervise file=looper.js
+while (true) { /* burns wall clock */ }
+```
+
+```sh run=supervise exit=6
+jsrt supervise looper.js --wall-ms 400 2>/dev/null | tail -1
+```
+
+```text output=supervise
+{"run_id":"<id>","outcome":"terminated","exit_code":6,"worker_pid":<pid>,"wall_ms":<n>,"cpu_ms":<n>,"peak_rss_bytes":<n>,"limits":{"max_rss_bytes":null,"max_cpu_secs":null,"wall_ms":<n>},"killed_by":"wall-clock","signal":15,"poll_interval_ms":25,"output":{"max_bytes_per_stream":8388608,"rate_bytes_per_sec":0,"redact_literals":0,"stdout_bytes":0,"stdout_dropped_bytes":0,"stdout_tail_bytes":0,"stdout_redacted_bytes":0,"stderr_bytes":0,"stderr_dropped_bytes":0,"stderr_tail_bytes":0,"stderr_redacted_bytes":0,"raw_passthrough":false,"tty_neutralised":{"stdout":false,"stderr":false}}}
+```
+
+`outcome` echoes the run's own class (`clean`, `exception`, `capability`, `terminated`, `host`, …);
+`killed_by` names the budget or `operator-sigterm`; `signal` the number that ended it.
+
+## Output — bounded, counted, neutralised
+
+- `--max-output-kb` (default 8192 = 8 MiB) caps each stream passed through; the rest is still read
+  and counted (`*_dropped_bytes`), a notice prints when the cap trips, and the last 4 KiB is
+  re-shown at exit (`*_tail_bytes`) — evidence survives the mute.
+- `--max-output-rate-kbs` turns the cap into a *burst*: sustained output above it is dropped, so a
+  chatty worker goes quiet but the run continues. Without it, the cap is a lifetime budget — a
+  long-lived worker eventually exhausts it and goes quiet.
+- TTY control sequences in forwarded output are **neutralised** unless `--output-raw` — a worker
+  can't move the operator's cursor, rewrite lines or paste-attack a terminal.
+- `--output-raw` passes bytes untouched (no prefix, no neutralisation) — trusted workers only.
+
+## Redaction — never a secret on argv
+
+`--redact-env NAME` masks the *value of that environment variable* in forwarded output — the
+literal never appears in `ps`. `--redact-file PATH` masks each non-empty line of a file, and
+**refuses group/world-readable files** (a world-readable secret is already a problem; supervise
+says so). Both are repeatable; redacted bytes are counted (`*_redacted_bytes`) so the report
+admits masking happened.
+
+A worker has no `process.env` — it can only print a secret it was handed another way (say, baked
+into a generated file). Here `leaker.js` happens to emit the value `hunter2`:
+
+```js title="leaker.js" run=supervise file=leaker.js
+rt.print("the token is hunter2\n");
+```
+
+```sh run=supervise
+SECRET_VALUE=hunter2 jsrt supervise leaker.js --redact-env SECRET_VALUE --report redact.jsonl 2>/dev/null
+```
+
+```text output=supervise
+the token is [redacted]
+```
+
+With `--redact-env SECRET_VALUE` set, any occurrence of `hunter2` in worker output is masked
+before forwarding, and `stdout_redacted_bytes` in the report counts what was masked. (There is
+deliberately no `--redact 'hunter2'` flag: argv is world-visible. The env/file paths exist
+precisely so the secret never lands on a command line.)
+
+## The report's full shape
+
+```json not-run="schema reference; the live runs above show real records"
+{"run_id","outcome","exit_code","worker_pid","wall_ms","cpu_ms","peak_rss_bytes",
+ "limits":{"max_rss_bytes","max_cpu_secs","wall_ms"},
+ "killed_by","signal","poll_interval_ms",
+ "output":{"max_bytes_per_stream","rate_bytes_per_sec","redact_literals",
+           "stdout_bytes","stdout_dropped_bytes","stdout_tail_bytes","stdout_redacted_bytes",
+           "stderr_bytes","stderr_dropped_bytes","stderr_tail_bytes","stderr_redacted_bytes",
+           "raw_passthrough","tty_neutralised":{"stdout","stderr"}}}
+```

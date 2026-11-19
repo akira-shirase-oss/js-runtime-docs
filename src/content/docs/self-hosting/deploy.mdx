@@ -1,0 +1,78 @@
+---
+title: Deploying with supervision
+description: A supervised jsrt service under systemd — the unit is a shape, not a claim.
+sidebar:
+  order: 2
+---
+
+A jsrt service is `jsrt supervise` under a process supervisor: supervise gives budgets, forwarded
+signals and the JSONL report; systemd (or your equivalent) gives restarts, environment and the unit
+file. This page is for operators — every block is `not-run` because a unit file is host-specific,
+but the commands inside are the ones the product's own webhook drill uses.
+
+## The manifest is the deploy artifact
+
+Capabilities ship with the service, not the binary. A unit's manifest declares exactly what the
+worker may do — a listener, a store, a read path — and anything not declared stays denied:
+
+```json not-run="example manifest for the webhook app; host-specific paths"
+{
+	"serve": { "host": "127.0.0.1", "port": 8080, "max_body": 1048576 },
+	"kv": { "path": "data/webhook.kv", "max_bytes": 8388608 },
+	"read": ["data"]
+}
+```
+
+## A systemd unit
+
+```ini not-run="host-specific unit shape — install paths, user and manifest path differ on every host"
+[Unit]
+Description=jsrt webhook worker
+After=network.target
+
+[Service]
+Type=simple
+User=jsrt
+WorkingDirectory=/srv/webhook
+ExecStart=/usr/local/bin/jsrt supervise app.js \
+    --manifest jsrt.manifest.json \
+    --timeout 0 --wall-ms 0 \
+    --report /var/log/jsrt/webhook.jsonl --report-max-kb 512 \
+    --max-rss-mb 256 --max-output-kb 8192
+Restart=on-failure
+RestartSec=2
+
+# the worker never runs ambient: no env the script could leak
+Environment=SECRET_VALUE=
+EnvironmentFile=-/etc/jsrt/webhook.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notes on the shape:
+
+- `--timeout 0 --wall-ms 0` — a service is long-lived; the *budgets* (`--max-rss-mb`,
+  `--max-cpu`) are the bounds, not a run deadline.
+- `--report …jsonl` — one record per worker lifetime; restarts append. Keep it rotated
+  (`--report-max-kb`) and tailed by whatever collects logs.
+- Secrets arrive by `--redact-env NAME` + `EnvironmentFile` — the file holds the value, the flag
+  holds only its *name*, and argv never sees the literal.
+- `Restart=on-failure` — a budgeted kill is a failure exit; supervise's `killed_by` in the report
+  tells you which budget it was.
+
+## Deploy, update, rollback
+
+The product's webhook drill is exactly this lifecycle — deploy v1, respawn on v2 with data intact,
+run a deliberately broken build (wire answers 500), inspect the report, roll back — scripted in
+`examples/webhook/drill.sh` with its transcript committed at `examples/webhook/drill.log`. The
+[webhook guide](/guides/webhook-app/) walks its deploy → dedup → list → restart core live.
+
+## Health
+
+The app owns its health endpoint (`/health` in the example). A check hits the worker's own
+listener — the only honest liveness is the thing the wire serves:
+
+```sh not-run="host-specific — the listener's port is the manifest's"
+curl -sf http://127.0.0.1:8080/health
+```

@@ -1,0 +1,80 @@
+---
+title: Security model
+description: What jsrt defends, what it deliberately does not — the honest list.
+sidebar:
+  order: 4
+---
+
+This page is honest on purpose: the defences are real, and so is the list of what they do not
+cover. Both halves are load-bearing.
+
+## Deny by default
+
+A script can only do what an op grants, and a capability only works if the manifest declares it —
+no manifest means a script can compute and print, and nothing else. Every refusal is a named
+`CapabilityError` a script can match, and every refusal names what the script asked for without
+becoming an existence oracle: a missing file, an out-of-fence file and a host file refuse alike.
+
+## Output is not trusted
+
+Under `jsrt supervise`, worker output is treated as hostile bytes from an untrusted program:
+
+- **TTY neutralisation** — control sequences are stripped before forwarding, so a worker cannot
+  move the operator's cursor, rewrite lines or stage a paste-attack. `--output-raw` disables this
+  deliberately: trusted workers only.
+- **Caps and rates** — `--max-output-kb` caps a stream (default 8 MiB); dropped bytes are counted,
+  a notice prints when the cap trips, and the last 4 KiB is re-shown at exit. `--max-output-rate-kbs`
+  makes it a *burst* + sustained rate, so a chatty worker goes quiet rather than flooding —
+  without it the cap is a lifetime budget a long-lived worker eventually exhausts.
+- **stderr is attributed** — `[run <run_id>]` prefixes worker stderr (stdout stays byte-exact
+  unless `--prefix-stdout`).
+
+## Secrets never land on argv
+
+`--redact-env NAME` masks the value of an *environment variable* in forwarded output — the flag
+names the variable, never the literal. `--redact-file PATH` masks each non-empty line of a file
+and **refuses group/world-readable files**. There is intentionally no `--redact 'literal'` flag:
+argv is world-visible, so a flag carrying the secret would leak it to `ps`. Masked bytes are
+counted in the report (`*_redacted_bytes`) — masking is admitted, not silent.
+
+## Everything is bounded
+
+Deadlines on fetch and the run, a 4 MiB fetch/read cap, a redirect re-check per hop, connection
+and body caps on the listener, header/body/write timeouts, an output cap, KV and media quotas, a
+heap ceiling, a report-file cap with rotation — and the supervisor's CPU/RSS/wall budgets around
+all of it. Every capability ships with its bound.
+
+## Still open — the residuals, as the README states them
+
+1. **Memory outside the V8 heap is bounded only by `jsrt supervise --max-rss-mb`.** `ArrayBuffer`
+   and host memory live outside the heap ceiling — the supervisor's footprint poll is the
+   boundary; unsupervised, there is none.
+2. **One call allocating more than ~1 GiB past the heap limit can still abort V8** — the
+   near-heap-limit callback catches growth, not a single oversized allocation.
+3. **Unsupervised `jsrt run` output is not capped** — caps are a supervisor feature; a bare run
+   writes what the script writes.
+4. **Any `.js`/`.mjs` under the entry directory is importable with no read grant** — the entry's
+   directory is program space on purpose, and a script can tell which such files exist there.
+   Keep an entry in a directory of its own.
+5. **`import.meta.url` and failed imports expose the entry directory's canonical path** — program
+   space names itself; don't point it at a path you consider secret.
+6. **At the serve connection cap, a newcomer behind slow readers can wait up to
+   `body_first_byte_ms`** — the cap answers fast 503s to excess, but an admitted slow reader holds
+   its slot for the first-byte grace before eviction.
+7. **Data imports are checked against the 4 MiB metadata cap, then read whole by the engine's
+   loader** — a file that grows between the check and the read can be read whole. A race, bounded
+   by the same read fence.
+
+None of these are hidden caveats — they are the product's own "Still open" list, kept here so an
+operator reads them where the operator looks.
+
+## What a script can never do
+
+- Reach a host file outside the read fence, a destination outside `net`, or a public bind — the
+  listener is a loopback IP literal only.
+- Resolve `localhost` (or any private-resolving name) through a plain `net` grant without an
+  explicit `private: true` opt-in — and environment proxies are ignored outright.
+- Import a remote module — `http:`, `https:`, `data:`, `blob:`, `node:`, `npm:` are refused at
+  resolve time.
+- Learn what exists outside its fences from a refusal — every refusal names what it asked for and
+  nothing more.

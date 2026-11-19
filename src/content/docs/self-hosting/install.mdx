@@ -1,0 +1,53 @@
+---
+title: Installing jsrt
+description: Build jsrt from source — there are no published binaries.
+sidebar:
+  order: 1
+---
+
+jsrt is built from source; **no binaries are published**. The build is one pinned Rust toolchain
+plus one `cargo build` — the pinned toolchain (`1.99.1` in `rust-toolchain.toml`) is what the
+product is developed and verified against.
+
+## Requirements
+
+- `rustup` (the repo's `rust-toolchain.toml` selects `1.99.1` on first cargo command).
+- Git. That's it — V8 arrives as a `deno_core` dependency, compiled by cargo.
+- First build downloads and compiles the V8 dependency (~95 MB source archive — cached by cargo
+  afterwards; CI caches on `Cargo.lock`).
+
+## Build
+
+```sh not-run="identical to the quick start, which runs it; repeated here for operators reading only this page"
+git clone https://github.com/akira-shirase-oss/js-runtime.git
+cd js-runtime
+cargo build --release --locked -p jsrt
+./target/release/jsrt --version   # jsrt 1.0.0
+```
+
+The same commands run for real on the [quick start](/quick-start/) — including the pinned-toolchain
+step — so this block is marked `not-run` only to avoid building twice on one page set.
+
+`--locked` honours `Cargo.lock`, so the build is the dependency set the tag was cut at. To pin the
+release itself: `git checkout v1.0.0` after the clone.
+
+## Where it lives
+
+The build produces a single binary at `target/release/jsrt`. Copy it anywhere on `PATH` — it is
+self-contained; its capabilities come from the manifest you run it with, not from anything
+installed beside it:
+
+```sh not-run="operator step — depends on where the binary lands on their host"
+install -m755 target/release/jsrt /usr/local/bin/jsrt
+jsrt --version
+```
+
+## Upgrading
+
+```sh not-run="operator step — same commands as the build above, plus git fetch"
+git fetch --tags && git checkout <new-tag>
+cargo build --release --locked -p jsrt
+```
+
+Then restart whatever supervision runs workers (a systemd unit, the drill, your own wrapper) —
+a running supervise holds the binary it was launched with.
